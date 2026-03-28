@@ -3489,9 +3489,8 @@ class SpamBotChecker:
     
     async def _single_tdata_check_with_proxy(self, tdata_path: str, tdata_name: str, 
                                               proxy_info: Optional[Dict], attempt: int) -> Tuple[str, str, str]:
-        """带代理的单个TData检查（增强版）"""
+        """带代理的单个TData检查（直连优化版，不转换为Session文件）"""
         client = None
-        session_name = None
         
         # 构建代理描述字符串
         if proxy_info:
@@ -3501,22 +3500,11 @@ class SpamBotChecker:
             proxy_used = "本地连接"
         
         try:
-            # 1. TData转Session（采用opentele方式）
+            # 1. 加载TData（直接连接，无需转换为Session文件）
             tdesk = TDesktop(tdata_path)
             
             if not tdesk.isLoaded():
                 return "连接错误", f"{proxy_used} | TData未授权或无效", tdata_name
-            
-            # 临时session文件优先使用内存文件系统（/dev/shm），减少磁盘IO
-            import sys as _sys
-            if _sys.platform == 'linux' and os.path.exists('/dev/shm'):
-                temp_session_dir = '/dev/shm'
-            else:
-                temp_session_dir = config.SESSIONS_BAK_DIR
-                os.makedirs(temp_session_dir, exist_ok=True)
-            # 使用time_ns()避免整数溢出问题
-            temp_session_name = f"temp_{time.time_ns()}_{attempt}"
-            session_name = os.path.join(temp_session_dir, temp_session_name)
             
             # 创建代理字典（如果提供了proxy_info）
             proxy_dict = None
@@ -3533,24 +3521,16 @@ class SpamBotChecker:
                 client_timeout = self.fast_timeout
                 connect_timeout = self.connection_timeout if proxy_dict else 6
             
-            # 先转换为Telethon session文件（不连接）
-            # 注意：ToTelethon会创建session文件但可能会自动连接，需要先断开
-            temp_client = await tdesk.ToTelethon(
-                session=session_name, 
-                flag=UseCurrentSession, 
-                api=API.TelegramDesktop
-            )
-            await temp_client.disconnect()
-            
-            # 使用session文件创建新的客户端（带或不带代理）
-            client = TelegramClient(
-                session_name,
-                int(config.API_ID),
-                str(config.API_HASH),
+            # 直接用TData创建Telethon客户端（内存StringSession，无磁盘IO）
+            from telethon.sessions import StringSession
+            client = await tdesk.ToTelethon(
+                session=StringSession(),
+                flag=UseCurrentSession,
+                api=API.TelegramDesktop,
                 timeout=client_timeout,
                 connection_retries=2,
                 retry_delay=1,
-                proxy=proxy_dict  # None if no proxy
+                proxy=proxy_dict
             )
             
             # 2. 连接测试（带超时）
@@ -3756,17 +3736,7 @@ class SpamBotChecker:
                     await client.disconnect()
                 except:
                     pass
-            # 清理临时session文件
-            if session_name:
-                try:
-                    session_file = f"{session_name}.session"
-                    if os.path.exists(session_file):
-                        os.remove(session_file)
-                    session_journal = f"{session_name}.session-journal"
-                    if os.path.exists(session_journal):
-                        os.remove(session_journal)
-                except:
-                    pass
+            # 使用StringSession无磁盘文件，无需清理
 
 # ================================
 # 数据库管理（增强管理员功能）
@@ -4731,122 +4701,8 @@ class FileProcessor:
         self.db = db
     
     async def convert_tdata_and_check(self, tdata_path: str, tdata_name: str) -> Tuple[str, str, str]:
-        """
-        将TData转换为临时Session并使用Session检查方法（带代理支持）
-        这样可以利用Session检查的代理支持和准确性
-        所有操作都会先通过代理连接
-        """
-        if not OPENTELE_AVAILABLE:
-            return "连接错误", "opentele库未安装，无法转换TData", tdata_name
-        
-        temp_session_path = None
-        temp_client = None
-        
-        try:
-            # 1. 加载TData
-            tdesk = TDesktop(tdata_path)
-            
-            if not tdesk.isLoaded():
-                return "连接错误", "TData未授权或无效", tdata_name
-            
-            # 2. 创建临时Session文件
-            os.makedirs(config.SESSIONS_BAK_DIR, exist_ok=True)
-            temp_session_name = f"tdata_check_{time.time_ns()}"
-            temp_session_path = os.path.join(config.SESSIONS_BAK_DIR, temp_session_name)
-            
-            # 3. 转换TData为Session（使用代理连接）
-            # 问题1: TData格式统一转成session来操作任务
-            print(f"🔄 [{tdata_name}] 开始TData转Session转换...")
-            try:
-                # 先转换为Session文件（不自动连接）
-                temp_client = await tdesk.ToTelethon(
-                    session=temp_session_path,
-                    flag=UseCurrentSession,
-                    api=API.TelegramDesktop
-                )
-                # 立即断开，避免非代理连接
-                await temp_client.disconnect()
-                print(f"✅ [{tdata_name}] TData转换完成")
-                
-                # 检查Session文件是否生成
-                session_file = f"{temp_session_path}.session"
-                if not os.path.exists(session_file):
-                    return "连接错误", "Session转换失败：文件未生成", tdata_name
-                
-                # 获取代理配置
-                proxy_enabled = self.db.get_proxy_enabled() if self.db else True
-                use_proxy = config.USE_PROXY and proxy_enabled and self.checker.proxy_manager.proxies
-                
-                # 问题3: 控制台显示代理链接信息
-                if use_proxy:
-                    print(f"📡 [{tdata_name}] 代理模式已启用，可用代理: {len(self.checker.proxy_manager.proxies)}个")
-                    proxy_info = self.checker.proxy_manager.get_next_proxy()
-                    if proxy_info:
-                        proxy_type = proxy_info.get('type', 'http').upper()
-                        is_residential = "住宅" if proxy_info.get('is_residential', False) else "普通"
-                        print(f"🔗 [{tdata_name}] 选择{is_residential}{proxy_type}代理进行连接测试")
-                        
-                        proxy_dict = self.checker.create_proxy_dict(proxy_info)
-                        if proxy_dict:
-                            # 使用代理重新创建客户端
-                            temp_client = TelegramClient(
-                                temp_session_path,
-                                int(config.API_ID),
-                                str(config.API_HASH),
-                                proxy=proxy_dict
-                            )
-                            # 测试代理连接
-                            try:
-                                print(f"⏳ [{tdata_name}] 通过代理连接Telegram服务器...")
-                                await asyncio.wait_for(temp_client.connect(), timeout=10)
-                                await temp_client.disconnect()
-                                print(f"✅ [{tdata_name}] 代理连接测试成功")
-                            except Exception as e:
-                                print(f"⚠️ [{tdata_name}] 代理连接测试失败: {str(e)[:50]}")
-                                print(f"   将在后续检查时重试其他代理")
-                        else:
-                            print(f"⚠️ [{tdata_name}] 代理配置失败，将在检查时重试")
-                    else:
-                        print(f"⚠️ [{tdata_name}] 无可用代理，将在检查时使用本地连接")
-                else:
-                    print(f"ℹ️ [{tdata_name}] 代理未启用或无可用代理，使用本地连接")
-                    
-            except Exception as e:
-                return "连接错误", f"TData转换失败: {str(e)[:50]}", tdata_name
-            
-            # 4. 使用Session检查方法（带代理支持）
-            # 这里会自动使用代理进行完整的账号检查
-            status, info, account_name = await self.checker.check_account_status(
-                session_file, tdata_name, self.db
-            )
-            
-            return status, info, account_name
-            
-        except Exception as e:
-            error_msg = str(e)
-            if 'database is locked' in error_msg.lower():
-                return "连接错误", "TData文件被占用", tdata_name
-            else:
-                return "连接错误", f"TData处理失败: {error_msg[:50]}", tdata_name
-        finally:
-            # 清理临时客户端连接
-            if temp_client:
-                try:
-                    await temp_client.disconnect()
-                except:
-                    pass
-            
-            # 清理临时Session文件
-            if temp_session_path:
-                try:
-                    session_file = f"{temp_session_path}.session"
-                    if os.path.exists(session_file):
-                        os.remove(session_file)
-                    session_journal = f"{temp_session_path}.session-journal"
-                    if os.path.exists(session_journal):
-                        os.remove(session_journal)
-                except Exception as e:
-                    logger.warning(f"清理临时Session文件失败: {e}")
+        """直接使用TData格式检测账号（无需转换为Session文件）"""
+        return await self.checker.check_tdata_with_spambot(tdata_path, tdata_name, self.db)
     
     def extract_phone_from_tdata_directory(self, tdata_path: str) -> str:
         """
@@ -5145,11 +5001,10 @@ class FileProcessor:
                         status, info, account_name = await self.checker.check_account_status(file_path, file_name, self.db)
                     else:
                         # TData文件夹
-                        print(f"📂 [{file_name}] 格式: TData - 将自动转换为Session进行检查")
+                        print(f"📂 [{file_name}] 格式: TData - 直接连接检查")
                         status, info, account_name = await self.convert_tdata_and_check(file_path, file_name)
                 else:  # tdata
-                    # 问题1: TData格式统一转换为Session后检查（更准确）
-                    print(f"📂 [{file_name}] 格式: TData - 将自动转换为Session进行检查")
+                    print(f"📂 [{file_name}] 格式: TData - 直接连接检查")
                     status, info, account_name = await self.convert_tdata_and_check(file_path, file_name)
                 
                 # 将状态映射到正确的分类
@@ -5194,7 +5049,7 @@ class FileProcessor:
         return results
 
     async def check_tdata_accounts_pipeline(self, files: List[Tuple[str, str]], update_callback) -> Dict[str, List[Tuple[str, str, str]]]:
-        """流水线：TData转换完成后立即并发检测（转换和检测同步推进，不等待全部转换完毕）"""
+        """直接检测TData账号（无需转换为Session，单阶段并发流水线）"""
         results = {
             "无限制": [],
             "垃圾邮件": [],
@@ -5212,24 +5067,19 @@ class FileProcessor:
         total = len(files)
         start_time = time.time()
         last_update_time = 0
+        processed = 0
 
-        convert_semaphore = asyncio.Semaphore(TDATA_PIPELINE_CONVERT_CONCURRENT)
         check_semaphore = asyncio.Semaphore(TDATA_PIPELINE_CHECK_CONCURRENT)
 
-        # 收集所有检测任务，以便最终等待
-        check_tasks: List[asyncio.Task] = []
-        processed = 0      # 最终完成数（转换失败 + 检测完成）
-        convert_done = 0   # 转换尝试完成数（用于转换阶段的进度显示）
-
         print(f"\n{'='*60}")
-        print(f"🚀 [流水线] 启动：{total} 个TData，转换并发={TDATA_PIPELINE_CONVERT_CONCURRENT}，检测并发={TDATA_PIPELINE_CHECK_CONCURRENT}")
+        print(f"🚀 [直连检测] 启动：{total} 个TData，并发={TDATA_PIPELINE_CHECK_CONCURRENT}（直接TData格式，无转换）")
         print(f"{'='*60}")
 
-        async def check_one(tdata_path: str, tdata_name: str, session_file: str):
+        async def check_one(tdata_path: str, tdata_name: str):
             nonlocal processed, last_update_time
             async with check_semaphore:
                 try:
-                    status, info, account_name = await self.checker.check_account_status(session_file, tdata_name, self.db)
+                    status, info, account_name = await self.checker.check_tdata_with_spambot(tdata_path, tdata_name, self.db)
                     mapped_status = status_mapping.get(status, status)
                     if mapped_status not in results:
                         print(f"⚠️ [检测] 未知状态 '{mapped_status}'，归类为连接错误: {tdata_name}")
@@ -5248,77 +5098,10 @@ class FileProcessor:
                 await update_callback(processed, total, results, speed, elapsed)
                 last_update_time = current_time
 
-            # 检测完成后立即清理该账号的临时session文件
-            try:
-                if os.path.exists(session_file):
-                    os.remove(session_file)
-                journal = session_file + "-journal"
-                if os.path.exists(journal):
-                    os.remove(journal)
-            except Exception as e:
-                logger.warning(f"清理临时Session文件失败: {e}")
-
-        async def convert_one(index: int, tdata_path: str, tdata_name: str):
-            nonlocal processed, last_update_time, convert_done
-            session_file = None
-            error = None
-            async with convert_semaphore:
-                if not OPENTELE_AVAILABLE:
-                    error = "opentele库未安装，无法转换TData"
-                else:
-                    try:
-                        tdesk = TDesktop(tdata_path)
-                        if not tdesk.isLoaded():
-                            error = "TData未授权或无效"
-                        else:
-                            os.makedirs(config.SESSIONS_BAK_DIR, exist_ok=True)
-                            temp_session_name = f"tdata_pipe_{time.time_ns()}_{index}"
-                            temp_session_path = os.path.join(config.SESSIONS_BAK_DIR, temp_session_name)
-                            temp_client = await asyncio.wait_for(
-                                tdesk.ToTelethon(session=temp_session_path, flag=UseCurrentSession, api=API.TelegramDesktop),
-                                timeout=TDATA_PIPELINE_CONVERT_TIMEOUT
-                            )
-                            await temp_client.disconnect()
-                            candidate = f"{temp_session_path}.session"
-                            if os.path.exists(candidate):
-                                session_file = candidate
-                                print(f"✅ [转换] [{tdata_name}] 转换完成，立即提交检测")
-                            else:
-                                error = "Session转换失败：文件未生成"
-                    except asyncio.TimeoutError:
-                        error = f"TData转换超时（{TDATA_PIPELINE_CONVERT_TIMEOUT}秒）"
-                        print(f"⏱️ [转换] [{tdata_name}] {error}")
-                    except Exception as e:
-                        error = f"TData转换失败: {str(e)[:50]}"
-                        print(f"❌ [转换] [{tdata_name}] {error}")
-
-            if session_file:
-                # 转换成功：立即创建检测任务，不等待其他转换完成
-                task = asyncio.create_task(check_one(tdata_path, tdata_name, session_file))
-                check_tasks.append(task)
-            else:
-                # 转换失败：直接记录错误，并计入进度
-                results["连接错误"].append((tdata_path, tdata_name, error or "TData转换失败"))
-                processed += 1
-
-            # 无论转换成功还是失败，都更新进度回调，让用户看到实时进展
-            convert_done += 1
-            current_time = time.time()
-            if update_callback and ((current_time - last_update_time >= 3) or (convert_done % 10 == 0) or (convert_done == total)):
-                elapsed = current_time - start_time
-                speed = convert_done / elapsed if elapsed > 0 else 0
-                await update_callback(convert_done, total, results, speed, elapsed)
-                last_update_time = current_time
-
-        # 并发执行所有转换任务；每个转换完成后立即异步提交检测任务
-        await asyncio.gather(*[convert_one(i, fp, fn) for i, (fp, fn) in enumerate(files)], return_exceptions=True)
-
-        # 等待所有已提交的检测任务完成
-        if check_tasks:
-            await asyncio.gather(*check_tasks, return_exceptions=True)
+        await asyncio.gather(*[check_one(fp, fn) for fp, fn in files], return_exceptions=True)
 
         print(f"\n{'='*60}")
-        print(f"🏁 [流水线] 全部完成：{total} 个TData账号检测完毕")
+        print(f"🏁 [直连检测] 全部完成：{total} 个TData账号检测完毕")
         print(f"{'='*60}\n")
 
         return results
