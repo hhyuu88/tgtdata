@@ -3527,9 +3527,6 @@ class SpamBotChecker:
                 session=StringSession(),
                 flag=UseCurrentSession,
                 api=API.TelegramDesktop,
-                timeout=client_timeout,
-                connection_retries=2,
-                retry_delay=1,
                 proxy=proxy_dict
             )
             
