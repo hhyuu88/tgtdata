@@ -1275,10 +1275,10 @@ def detect_tdata_structure(account_path: str) -> Optional[Tuple]:
 
 def is_valid_tdata(tdata_path: str) -> bool:
     """
-    检查 tdata 目录是否有效
+    检查 tdata 目录是否有效（支持 D877 目录嵌套最多5层深）
     
     有效的 tdata 目录应该包含:
-    - 一个类似 D877F783D5D3EF8C 的子目录
+    - 一个类似 D877F783D5D3EF8C 的子目录（可嵌套在最多5层子文件夹中）
     - key_datas 或 key_data 文件可以在：
       1. D877F783D5D3EF8C 子目录内（标准结构）
       2. 与 D877F783D5D3EF8C 同级（变体结构）
@@ -1293,34 +1293,31 @@ def is_valid_tdata(tdata_path: str) -> bool:
         return False
     
     try:
-        has_d877_dir = False
-        has_key_file = False
-        
-        for item in os.listdir(tdata_path):
-            item_path = os.path.join(tdata_path, item)
-            
-            # 检查是否有 D877 开头的目录
-            if os.path.isdir(item_path) and item.startswith('D877'):
-                has_d877_dir = True
-                
-                # 检查 D877 目录内是否有 key_datas 或 key_data（标准结构）
-                key_datas_path = os.path.join(item_path, 'key_datas')
-                key_data_path = os.path.join(item_path, 'key_data')
-                if os.path.exists(key_datas_path) or os.path.exists(key_data_path):
-                    return True
-            
-            # 检查与 D877 同级的 key_datas 或 key_data 文件（变体结构）
-            if item in ('key_datas', 'key_data') and os.path.isfile(item_path):
-                has_key_file = True
-        
-        # 如果有 D877 目录且有同级的 key 文件，也认为是有效的
-        if has_d877_dir and has_key_file:
-            return True
-            
+        for root, dirs, files in os.walk(tdata_path):
+            # 限制搜索深度为5层
+            rel = os.path.relpath(root, tdata_path)
+            depth = 0 if rel == '.' else len(rel.split(os.sep))
+            if depth >= 5:
+                dirs[:] = []  # 不再深入
+                continue
+
+            # 检查当前层级是否有 key_datas / key_data 文件（变体结构）
+            if 'key_datas' in files or 'key_data' in files:
+                return True
+
+            # 检查当前层级是否有 D877 开头的目录
+            for d in dirs:
+                if d.startswith('D877'):
+                    d877_path = os.path.join(root, d)
+                    # 检查 D877 目录内（含子目录）是否有 key_datas / key_data
+                    for d_root, _, d_files in os.walk(d877_path):
+                        if 'key_datas' in d_files or 'key_data' in d_files:
+                            return True
+
     except (OSError, PermissionError) as e:
         logger.warning(f"检查tdata目录失败 {tdata_path}: {e}")
         return False
-    
+
     return False
 
 def scan_tdata_accounts(base_path: str) -> list:
@@ -1377,16 +1374,28 @@ def scan_tdata_accounts(base_path: str) -> list:
         return False
     
     def find_tdata_path(account_path: str) -> str:
-        """在账号目录中查找 tdata 路径，优先返回标准 tdata 子目录，否则返回账号根目录"""
-        # 优先查找标准的 tdata 子目录
-        tdata_path = os.path.join(account_path, 'tdata')
-        if os.path.isdir(tdata_path) and is_valid_tdata(tdata_path):
-            return tdata_path
-        
-        # 如果没有标准 tdata 子目录，但账号目录包含 tdata 文件，返回账号根目录
+        """在账号目录中查找 tdata 路径（支持嵌套最多5层），优先返回有效的 tdata 子目录，否则返回账号根目录"""
+        # 优先查找直接子目录中的 tdata
+        direct_tdata = os.path.join(account_path, 'tdata')
+        if os.path.isdir(direct_tdata) and is_valid_tdata(direct_tdata):
+            return direct_tdata
+
+        # 搜索嵌套的 tdata 目录（最多5层深）
+        for root, dirs, _ in os.walk(account_path):
+            rel = os.path.relpath(root, account_path)
+            depth = 0 if rel == '.' else len(rel.split(os.sep))
+            if depth >= 5:
+                dirs[:] = []  # 不再深入
+                continue
+            if 'tdata' in dirs:
+                nested_tdata = os.path.join(root, 'tdata')
+                if nested_tdata != direct_tdata and is_valid_tdata(nested_tdata):
+                    return nested_tdata
+
+        # 如果没有找到有效的 tdata 子目录，但账号目录本身包含 tdata 文件，返回账号根目录
         if has_tdata_files(account_path):
             return account_path
-        
+
         return None
     
     def scan_directory(dir_path):
@@ -20537,9 +20546,14 @@ class EnhancedBot:
         tdata_accounts = []
         for account in tdata_accounts_unified:
             account_root = account['account_path']
-            tdata_dir_name = 'tdata'  # 统一使用 'tdata' 作为目录名
+            tdata_path_abs = account['tdata_path']
+            # 计算 tdata 相对于账号根目录的路径（空字符串表示 tdata 就是账号根目录）
+            if tdata_path_abs == account_root:
+                tdata_dir_name = ''
+            else:
+                tdata_dir_name = os.path.relpath(tdata_path_abs, account_root)
             tdata_accounts.append((account_root, tdata_dir_name))
-            print(f"📂 找到TData账号: {account['phone']} -> {account['tdata_path']}")
+            print(f"📂 找到TData账号: {account['phone']} -> {tdata_path_abs}")
         
         # 扫描Session文件
         session_json_pairs = []  # 存储 Session+JSON 配对
@@ -20638,8 +20652,24 @@ class EnhancedBot:
             with zipfile.ZipFile(tdata_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 # 先处理有手机号的账户
                 for phone, (account_root, tdata_dir_name) in tdata_with_phones.items():
-                    tdata_full_path = os.path.join(account_root, tdata_dir_name)
-                    
+                    tdata_full_path = os.path.join(account_root, tdata_dir_name) if tdata_dir_name else account_root
+
+                    # 检查 tdata 同级目录是否有密码文件
+                    password_patterns = [
+                        '2fa.txt', '2FA.txt', '2fa.TXT',
+                        'twofa.txt', 'twoFA.txt', 'TwoFA.txt', 'TWOFA.txt',
+                        'password.txt', 'Password.txt', 'PASSWORD.txt',
+                        'pwd.txt', 'PWD.txt', 'Pwd.txt',
+                        '两步验证.txt', '二步验证.txt', '密码.txt',
+                        'pass.txt', 'Pass.txt', 'PASS.txt'
+                    ]
+                    for pwd_file in password_patterns:
+                        pwd_path = os.path.join(account_root, pwd_file)
+                        if os.path.isfile(pwd_path):
+                            arcname = os.path.join(phone, pwd_file)
+                            zf.write(pwd_path, arcname)
+                            print(f"✅ 添加密码文件: {phone}/{pwd_file}")
+
                     # 递归添加 tdata 目录下的所有文件
                     for root, dirs, filenames in os.walk(tdata_full_path):
                         for fname in filenames:
@@ -20653,8 +20683,24 @@ class EnhancedBot:
                 # 处理没有手机号的账户（使用account_N命名）
                 for idx, (account_root, tdata_dir_name) in enumerate(tdata_without_phones, 1):
                     account_name = f'account_{idx}'
-                    tdata_full_path = os.path.join(account_root, tdata_dir_name)
-                    
+                    tdata_full_path = os.path.join(account_root, tdata_dir_name) if tdata_dir_name else account_root
+
+                    # 检查 tdata 同级目录是否有密码文件
+                    password_patterns = [
+                        '2fa.txt', '2FA.txt', '2fa.TXT',
+                        'twofa.txt', 'twoFA.txt', 'TwoFA.txt', 'TWOFA.txt',
+                        'password.txt', 'Password.txt', 'PASSWORD.txt',
+                        'pwd.txt', 'PWD.txt', 'Pwd.txt',
+                        '两步验证.txt', '二步验证.txt', '密码.txt',
+                        'pass.txt', 'Pass.txt', 'PASS.txt'
+                    ]
+                    for pwd_file in password_patterns:
+                        pwd_path = os.path.join(account_root, pwd_file)
+                        if os.path.isfile(pwd_path):
+                            arcname = os.path.join(account_name, pwd_file)
+                            zf.write(pwd_path, arcname)
+                            print(f"✅ 添加密码文件: {account_name}/{pwd_file}")
+
                     for root, dirs, filenames in os.walk(tdata_full_path):
                         for fname in filenames:
                             file_path = os.path.join(root, fname)
