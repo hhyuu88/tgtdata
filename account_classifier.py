@@ -442,6 +442,31 @@ class AccountClassifier:
                     base = it.path
                     base_is_tdata = os.path.basename(base).lower() == "tdata"
 
+                    # 复制 tdata 同级的密码文件（如 2fa.txt、password.txt 等）
+                    password_patterns = {
+                        '2fa.txt', '2FA.txt', '2fa.TXT',
+                        'twofa.txt', 'twoFA.txt', 'TwoFA.txt', 'TWOFA.txt',
+                        'password.txt', 'Password.txt', 'PASSWORD.txt',
+                        'pwd.txt', 'PWD.txt', 'Pwd.txt',
+                        '两步验证.txt', '二步验证.txt', '密码.txt',
+                        'pass.txt', 'Pass.txt', 'PASS.txt',
+                    }
+                    # 获取密码文件的查找目录：tdata 同级目录（即 tdata 的父目录）
+                    # 若 base 就是 tdata 目录，则其父目录即为账号根目录（存放密码文件处）
+                    # 若 base 是账号根目录（无独立 tdata 子目录），则直接在其内查找
+                    parent_dir = os.path.dirname(base) if base_is_tdata else base
+                    try:
+                        sibling_files = set(os.listdir(parent_dir))
+                    except OSError:
+                        sibling_files = set()
+                    for pwd_file in password_patterns & sibling_files:
+                        pwd_path = os.path.join(parent_dir, pwd_file)
+                        if os.path.isfile(pwd_path):
+                            arcname = os.path.join(account_root, pwd_file)
+                            if arcname not in written:
+                                zf.write(pwd_path, arcname=arcname)
+                                written.add(arcname)
+
                     for rp, _, fns in os.walk(base):
                         for fn in fns:
                             full = os.path.join(rp, fn)

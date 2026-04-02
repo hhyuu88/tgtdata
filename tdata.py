@@ -17395,6 +17395,7 @@ class EnhancedBot:
             return
         
         temp_zip = None
+        extract_dir = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_classify_")
             temp_zip = os.path.join(temp_dir, document.file_name)
@@ -17411,6 +17412,8 @@ class EnhancedBot:
                     )
                 except:
                     pass
+                # 清理临时目录
+                shutil.rmtree(temp_dir, ignore_errors=True)
                 return
             
             # 构建元数据
@@ -17465,6 +17468,11 @@ class EnhancedBot:
             if temp_zip and os.path.exists(temp_zip):
                 try:
                     shutil.rmtree(os.path.dirname(temp_zip), ignore_errors=True)
+                except:
+                    pass
+            if extract_dir and os.path.exists(extract_dir):
+                try:
+                    shutil.rmtree(extract_dir, ignore_errors=True)
                 except:
                     pass
     
@@ -17528,12 +17536,13 @@ class EnhancedBot:
         task_id = task['task_id']
         progress_msg = task['progress_msg']
         
+        total = len(metas)
+        if qty > total:
+            self.safe_send_message(update, t(user_id, 'split_error_qty_exceeds').format(qty=qty, total=total))
+            return
+        
+        out_dir = os.path.join(config.RESULTS_DIR, f"classify_{task_id}")
         try:
-            total = len(metas)
-            if qty > total:
-                self.safe_send_message(update, t(user_id, 'split_error_qty_exceeds').format(qty=qty, total=total))
-                return
-            
             # 更新提示
             try:
                 progress_msg.edit_text(
@@ -17547,7 +17556,6 @@ class EnhancedBot:
             num_bundles = (total + qty - 1) // qty
             sizes = [qty] * (num_bundles - 1) + [total - (num_bundles - 1) * qty]
             
-            out_dir = os.path.join(config.RESULTS_DIR, f"classify_{task_id}")
             bundles = self.classifier.split_by_quantities(metas, sizes, out_dir, t_func=lambda key: t(user_id, key))
             
             # 发送结果
@@ -17568,13 +17576,6 @@ class EnhancedBot:
                 f"{t(user_id, 'split_use_again')}",
                 'HTML'
             )
-            
-            # 清理
-            try:
-                if os.path.exists(out_dir):
-                    shutil.rmtree(out_dir, ignore_errors=True)
-            except:
-                pass
         
         except Exception as e:
             print(f"❌ 单数量拆分失败: {e}")
@@ -17582,6 +17583,13 @@ class EnhancedBot:
             traceback.print_exc()
             self.safe_send_message(update, f"❌ 拆分失败: {str(e)}")
         finally:
+            # 清理输出目录
+            try:
+                if os.path.exists(out_dir):
+                    shutil.rmtree(out_dir, ignore_errors=True)
+            except:
+                pass
+            # 清理上传的临时文件和解压目录
             self._classify_cleanup(user_id)
     
     async def _classify_split_multi_qty(self, update, context, user_id, quantities):
@@ -17595,6 +17603,7 @@ class EnhancedBot:
         task_id = task['task_id']
         progress_msg = task['progress_msg']
         
+        out_dir = os.path.join(config.RESULTS_DIR, f"classify_{task_id}")
         try:
             total = len(metas)
             total_requested = sum(quantities)
@@ -17611,7 +17620,6 @@ class EnhancedBot:
             except:
                 pass
             
-            out_dir = os.path.join(config.RESULTS_DIR, f"classify_{task_id}")
             bundles = self.classifier.split_by_quantities(metas, quantities, out_dir, t_func=lambda key: t(user_id, key))
             
             # 余数提示
@@ -17640,13 +17648,6 @@ class EnhancedBot:
                 f"{t(user_id, 'split_use_again')}",
                 'HTML'
             )
-            
-            # 清理
-            try:
-                if os.path.exists(out_dir):
-                    shutil.rmtree(out_dir, ignore_errors=True)
-            except:
-                pass
         
         except Exception as e:
             print(f"❌ 多数量拆分失败: {e}")
@@ -17654,6 +17655,13 @@ class EnhancedBot:
             traceback.print_exc()
             self.safe_send_message(update, f"❌ 拆分失败: {str(e)}")
         finally:
+            # 清理输出目录
+            try:
+                if os.path.exists(out_dir):
+                    shutil.rmtree(out_dir, ignore_errors=True)
+            except:
+                pass
+            # 清理上传的临时文件和解压目录
             self._classify_cleanup(user_id)
     
     def handle_classify_callbacks(self, update, context, query, data):
@@ -17772,6 +17780,7 @@ class EnhancedBot:
         task_id = task['task_id']
         progress_msg = task['progress_msg']
         
+        out_dir = os.path.join(config.RESULTS_DIR, f"classify_{task_id}")
         try:
             # 更新提示
             try:
@@ -17782,7 +17791,6 @@ class EnhancedBot:
             except:
                 pass
             
-            out_dir = os.path.join(config.RESULTS_DIR, f"classify_{task_id}")
             bundles = self.classifier.split_by_country(metas, out_dir, t_func=lambda key: t(user_id, key))
             
             # 发送结果
@@ -17803,13 +17811,6 @@ class EnhancedBot:
                 f"{t(user_id, 'split_use_again')}",
                 'HTML'
             )
-            
-            # 清理
-            try:
-                if os.path.exists(out_dir):
-                    shutil.rmtree(out_dir, ignore_errors=True)
-            except:
-                pass
         
         except Exception as e:
             print(f"❌ 国家拆分失败: {e}")
@@ -17817,6 +17818,13 @@ class EnhancedBot:
             traceback.print_exc()
             self.safe_send_message(update, f"❌ 拆分失败: {str(e)}")
         finally:
+            # 清理输出目录
+            try:
+                if os.path.exists(out_dir):
+                    shutil.rmtree(out_dir, ignore_errors=True)
+            except:
+                pass
+            # 清理上传的临时文件和解压目录
             self._classify_cleanup(user_id)
     
     # ================================
