@@ -41,6 +41,7 @@ TEXTS = {
     'btn_cleanup': '🧹 Очистка в один клик',
     'btn_reauthorize': '🔑 Повторная авторизация',
     'btn_check_registration': '🕰️ Проверить время регистрации',
+    'btn_frozen_check': '📅 Проверить время заморозки',
     'btn_profile_update': '📝 Редактировать профиль',
     'btn_check_contact_limit': '🔍 Проверить ограничения контактов',
     'btn_vip_menu': '💳 Активировать/Погасить подписку',
@@ -1815,6 +1816,21 @@ TEXTS = {
     'regtime_found_accounts': '✅ Найдено {count} файлов аккаунтов',
     'regtime_file_type_session': 'Тип файла: SESSION',
     'regtime_file_type_tdata': 'Тип файла: TDATA',
+
+    # ===== Функция проверки времени заморозки =====
+    'frozen_check_title': '📅 Проверка времени заморозки',
+    'frozen_check_desc': 'Определить время заморозки аккаунтов',
+    'frozen_check_upload': 'Пожалуйста, загрузите ZIP-файл с аккаунтами',
+    'frozen_check_processing': 'Проверка статуса аккаунтов...',
+    'frozen_check_progress': 'Прогресс: {current}/{total} ({percent}%)',
+    'frozen_check_result_total': 'Всего: {count} аккаунтов',
+    'frozen_check_result_frozen': 'Заморожено: {count}',
+    'frozen_check_result_normal': 'Нормальных: {count}',
+    'frozen_check_result_banned': 'Навсегда заблокировано: {count}',
+    'frozen_check_result_error': 'Ошибок: {count}',
+    'frozen_check_report': '📄 Отчет о времени заморозки',
+    'frozen_check_frozen_zip': '❄️ Замороженные аккаунты ({count})',
+    'frozen_check_normal_zip': '✅ Нормальные аккаунты ({count})',
     
     # 4. Описание обработки
     'regtime_process_title': 'Описание обработки:',

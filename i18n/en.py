@@ -41,6 +41,7 @@ TEXTS = {
     'btn_cleanup': '🧹 One-Click Cleanup',
     'btn_reauthorize': '🔑 Re-authorize',
     'btn_check_registration': '🕰️ Check Registration Time',
+    'btn_frozen_check': '📅 Check Frozen Time',
     'btn_profile_update': '📝 Update Profile',
     'btn_check_contact_limit': '🔍 Check Contact Restrictions',
     'btn_vip_menu': '💳 Activate/Redeem Membership',
@@ -1822,6 +1823,21 @@ TEXTS = {
     'regtime_found_accounts': '✅ Found {count} account files',
     'regtime_file_type_session': 'File type: SESSION',
     'regtime_file_type_tdata': 'File type: TDATA',
+
+    # ===== Check Frozen Time Feature =====
+    'frozen_check_title': '📅 Check Frozen Time',
+    'frozen_check_desc': 'Detect when accounts were frozen',
+    'frozen_check_upload': 'Please upload ZIP file with accounts',
+    'frozen_check_processing': 'Checking account status...',
+    'frozen_check_progress': 'Progress: {current}/{total} ({percent}%)',
+    'frozen_check_result_total': 'Total: {count} accounts',
+    'frozen_check_result_frozen': 'Frozen: {count}',
+    'frozen_check_result_normal': 'Normal: {count}',
+    'frozen_check_result_banned': 'Permanently banned: {count}',
+    'frozen_check_result_error': 'Failed: {count}',
+    'frozen_check_report': '📄 Frozen Time Report',
+    'frozen_check_frozen_zip': '❄️ Frozen Accounts ({count})',
+    'frozen_check_normal_zip': '✅ Normal Accounts ({count})',
     
     # 4. Processing Info
     'regtime_process_title': 'Processing Info:',

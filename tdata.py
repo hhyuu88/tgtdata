@@ -104,6 +104,12 @@ PROGRESS_UPDATE_MIN_PERCENT = 2  # 最小百分比变化才更新（用于中等
 PROGRESS_UPDATE_MIN_PERCENT_LARGE = 5  # 大批量处理时的最小百分比变化
 PROGRESS_LARGE_BATCH_THRESHOLD = 500  # 大批量阈值
 
+# 冻结时间检测配置
+FROZEN_CHECK_MAX_CONCURRENT = 30
+FROZEN_CHECK_SINGLE_TIMEOUT = 30
+FROZEN_CHECK_UPDATE_INTERVAL = 10
+FROZEN_CHECK_UPDATE_PERCENT_STEP = 5
+
 # 通讯录限制检测状态常量
 CONTACT_STATUS_NORMAL = 'normal'
 CONTACT_STATUS_LIMITED = 'limited'
@@ -371,6 +377,17 @@ class ProfileUpdateConfig:
     update_username: bool = False
     username_action: str = 'keep'  # 'keep', 'delete', 'random', 'custom'
     custom_usernames: List[str] = field(default_factory=list)  # 自定义用户名列表
+
+
+@dataclass
+class FrozenCheckResult:
+    """冻结检测结果"""
+    phone: str
+    status: str  # frozen / normal / banned / unknown
+    display_time: str
+    file_path: str
+    file_name: str
+    file_type: str
 
 # ================================
 # 代理管理器
@@ -11141,6 +11158,9 @@ class EnhancedBot:
         
         # 查询注册时间任务跟踪
         self.pending_registration_check: Dict[int, Dict[str, Any]] = {}
+
+        # 冻结时间检测任务跟踪
+        self.pending_frozen_check: Dict[int, Dict[str, Any]] = {}
         
         # 资料修改待处理任务
         self.pending_profile_update: Dict[int, Dict[str, Any]] = {}
@@ -11704,7 +11724,10 @@ class EnhancedBot:
                 InlineKeyboardButton(t(user_id, 'btn_check_registration'), callback_data="check_registration_start")
             ],
             [
-                InlineKeyboardButton(t(user_id, 'btn_profile_update'), callback_data="profile_update_start"),
+                InlineKeyboardButton(t(user_id, 'btn_frozen_check'), callback_data="frozen_check"),
+                InlineKeyboardButton(t(user_id, 'btn_profile_update'), callback_data="profile_update_start")
+            ],
+            [
                 InlineKeyboardButton(t(user_id, 'btn_check_contact_limit'), callback_data="check_contact_limit")
             ],
             [
@@ -12855,6 +12878,8 @@ class EnhancedBot:
             self.handle_check_registration_start(query)
         elif data.startswith("check_reg_"):
             self.handle_check_registration_callbacks(update, context, query, data)
+        elif data == "frozen_check":
+            self.handle_frozen_check_start(query)
         elif data == "profile_update_start":
             self.handle_profile_update_start(query)
         elif data.startswith("profile_"):
@@ -14421,6 +14446,7 @@ class EnhancedBot:
                 "batch_create_usernames",
                 "reauthorize_upload",
                 "registration_check_upload",
+                "frozen_check_upload",
                 "profile_update_upload",
                 "waiting_contact_check_file",
             ]
@@ -14632,6 +14658,8 @@ class EnhancedBot:
                     traceback.print_exc()
             thread = threading.Thread(target=process_registration_check, daemon=True)
             thread.start()
+        elif user_status == "frozen_check_upload":
+            self.handle_frozen_check_file(update, context, document)
         elif user_status == "profile_update_upload":
             # 资料修改文件处理
             def process_profile_update():
@@ -24830,6 +24858,460 @@ admin3</code>
             except:
                 pass
     
+    # ================================
+    # 检查冻结时间功能
+    # ================================
+
+    def handle_frozen_check_start(self, query):
+        """处理检查冻结时间开始"""
+        query.answer()
+        user_id = query.from_user.id
+
+        # 检查会员权限
+        if not self.db.is_admin(user_id):
+            is_member, _, _ = self.db.check_membership(user_id)
+            if not is_member:
+                query.edit_message_text(
+                    text=t(user_id, 'cleanup_need_member'),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(t(user_id, 'btn_vip_menu'), callback_data="vip_menu"),
+                        InlineKeyboardButton(t(user_id, 'btn_back_to_menu'), callback_data="back_to_main")
+                    ]]),
+                    parse_mode='HTML'
+                )
+                return
+
+        text = f"""
+<b>{t(user_id, 'frozen_check_title')}</b>
+
+{t(user_id, 'frozen_check_desc')}
+
+{t(user_id, 'frozen_check_upload')}
+"""
+        query.edit_message_text(
+            text=text,
+            reply_markup=get_back_to_menu_keyboard(user_id),
+            parse_mode='HTML'
+        )
+
+        self.db.save_user(user_id, "", "", "frozen_check_upload")
+
+    def handle_frozen_check_file(self, update: Update, context: CallbackContext, document):
+        """处理冻结检测文件上传"""
+        user_id = update.effective_user.id
+        progress_msg = self.safe_send_message(update, f"📅 <b>{t(user_id, 'frozen_check_title')}</b>\n\n📥 {t(user_id, 'processing_your_file')}...", 'HTML')
+        if not progress_msg:
+            return
+
+        self.pending_frozen_check[user_id] = {
+            'document': document,
+            'progress_msg': progress_msg
+        }
+
+        def run_frozen_check():
+            try:
+                asyncio.run(self.process_frozen_check(update, context, user_id))
+            except asyncio.CancelledError:
+                print(f"[run_frozen_check] 任务被取消")
+            except Exception as e:
+                print(f"[run_frozen_check] 处理异常: {e}")
+                traceback.print_exc()
+
+        threading.Thread(target=run_frozen_check, daemon=True).start()
+
+    def cleanup_frozen_check_task(self, user_id: int):
+        """清理冻结检测任务"""
+        if user_id in self.pending_frozen_check:
+            task = self.pending_frozen_check[user_id]
+            if task.get('temp_dir') and os.path.exists(task['temp_dir']):
+                shutil.rmtree(task['temp_dir'], ignore_errors=True)
+            del self.pending_frozen_check[user_id]
+        self.db.save_user(user_id, "", "", "")
+
+    def _format_frozen_time_value(self, value) -> Optional[str]:
+        """格式化冻结时间到北京时间"""
+        if value is None:
+            return None
+
+        dt = None
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        elif isinstance(value, (int, float)):
+            dt = datetime.fromtimestamp(int(value), tz=timezone.utc)
+        elif isinstance(value, str) and value.isdigit():
+            dt = datetime.fromtimestamp(int(value), tz=timezone.utc)
+
+        if not dt:
+            return None
+        return dt.astimezone(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+    def _pack_frozen_check_accounts(self, results: List[FrozenCheckResult], zip_path: str):
+        """打包冻结检测账号结果"""
+        password_patterns = [
+            '2fa.txt', '2FA.txt', '2fa.TXT',
+            'twofa.txt', 'twoFA.txt', 'TwoFA.txt', 'TWOFA.txt',
+            'password.txt', 'Password.txt', 'PASSWORD.txt',
+            'pwd.txt', 'PWD.txt', 'Pwd.txt',
+            '两步验证.txt', '二步验证.txt', '密码.txt',
+            'pass.txt', 'Pass.txt', 'PASS.txt'
+        ]
+
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            written = set()
+            for item in results:
+                if not os.path.exists(item.file_path):
+                    continue
+
+                safe_phone = (item.phone or os.path.splitext(item.file_name)[0] or "unknown").strip()
+                if item.file_type == 'tdata' and os.path.isdir(item.file_path):
+                    account_root = os.path.dirname(item.file_path)
+                    for pwd_file in password_patterns:
+                        pwd_path = os.path.join(account_root, pwd_file)
+                        arcname = os.path.join(safe_phone, pwd_file)
+                        if os.path.isfile(pwd_path) and arcname not in written:
+                            zf.write(pwd_path, arcname)
+                            written.add(arcname)
+
+                    for root, _, files in os.walk(item.file_path):
+                        for fname in files:
+                            file_full_path = os.path.join(root, fname)
+                            rel_path = os.path.relpath(file_full_path, account_root)
+                            arcname = os.path.join(safe_phone, rel_path)
+                            if arcname in written:
+                                continue
+                            zf.write(file_full_path, arcname)
+                            written.add(arcname)
+                elif item.file_type == 'session':
+                    session_arc = f"{safe_phone}.session"
+                    if os.path.isfile(item.file_path) and session_arc not in written:
+                        zf.write(item.file_path, session_arc)
+                        written.add(session_arc)
+
+                    base, ext = os.path.splitext(item.file_path)
+                    if ext.lower() == '.session':
+                        json_path = f"{base}.json"
+                        if os.path.isfile(json_path):
+                            json_arc = f"{safe_phone}.json"
+                            if json_arc not in written:
+                                zf.write(json_path, json_arc)
+                                written.add(json_arc)
+
+                        journal_path = f"{item.file_path}-journal"
+                        if os.path.isfile(journal_path):
+                            journal_arc = f"{safe_phone}.session-journal"
+                            if journal_arc not in written:
+                                zf.write(journal_path, journal_arc)
+                                written.add(journal_arc)
+
+    async def process_frozen_check(self, update, context, user_id):
+        """冻结检测主流程"""
+        task = self.pending_frozen_check.get(user_id)
+        if not task:
+            return
+
+        progress_msg = task.get('progress_msg')
+        document = task.get('document')
+        if not progress_msg or not document:
+            self.cleanup_frozen_check_task(user_id)
+            return
+
+        start_time = time.time()
+        temp_dir = None
+        output_dir = None
+        try:
+            self._cleanup_user_temp_sessions(user_id)
+
+            temp_dir = tempfile.mkdtemp(prefix="frozen_check_")
+            task['temp_dir'] = temp_dir
+            temp_zip = os.path.join(temp_dir, document.file_name)
+            document.get_file().download(temp_zip)
+
+            unique_task_id = f"{user_id}_frozen_{int(time.time() * 1000)}"
+            files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, unique_task_id)
+            if not files:
+                self.safe_edit_message_text(progress_msg, f"❌ {t(user_id, 'regtime_no_valid_files')}", parse_mode='HTML')
+                return
+
+            total = len(files)
+            results: List[FrozenCheckResult] = []
+            stats = {'frozen': 0, 'normal': 0, 'banned': 0, 'unknown': 0}
+            processed = 0
+            lock = asyncio.Lock()
+            update_state = {'last_time': 0.0, 'last_percent': 0}
+
+            async def update_progress(force: bool = False):
+                now = time.time()
+                percent = int((processed / total) * 100) if total > 0 else 100
+                should_update = force or processed == total
+                should_update = should_update or (now - update_state['last_time'] >= FROZEN_CHECK_UPDATE_INTERVAL)
+                should_update = should_update or (percent - update_state['last_percent'] >= FROZEN_CHECK_UPDATE_PERCENT_STEP)
+                if not should_update:
+                    return
+
+                update_state['last_time'] = now
+                update_state['last_percent'] = percent
+                elapsed = int(now - start_time)
+                elapsed_min = elapsed // 60
+                elapsed_sec = elapsed % 60
+                text = f"""<b>{t(user_id, 'frozen_check_title')}</b>
+
+📥 已上传文件，开始处理...
+🔄 {t(user_id, 'frozen_check_processing')}
+
+{t(user_id, 'frozen_check_progress').format(current=processed, total=total, percent=percent)}
+⏱️ 已用时：{elapsed_min}分{elapsed_sec}秒
+📊 当前统计：
+  • {t(user_id, 'frozen_check_result_frozen').format(count=stats['frozen'])}
+  • {t(user_id, 'frozen_check_result_normal').format(count=stats['normal'])}
+  • {t(user_id, 'frozen_check_result_banned').format(count=stats['banned'])}
+  • {t(user_id, 'frozen_check_result_error').format(count=stats['unknown'])}
+"""
+                self.safe_edit_message_text(progress_msg, text, parse_mode='HTML')
+
+            await update_progress(force=True)
+
+            semaphore = asyncio.Semaphore(FROZEN_CHECK_MAX_CONCURRENT)
+
+            async def run_single(file_path: str, file_name: str):
+                nonlocal processed
+                async with semaphore:
+                    try:
+                        result = await asyncio.wait_for(
+                            self.check_account_frozen_status(file_path, file_type, file_name),
+                            timeout=FROZEN_CHECK_SINGLE_TIMEOUT
+                        )
+                    except Exception:
+                        result = FrozenCheckResult(
+                            phone=os.path.splitext(file_name)[0],
+                            status='unknown',
+                            display_time='未知',
+                            file_path=file_path,
+                            file_name=file_name,
+                            file_type=file_type
+                        )
+
+                    async with lock:
+                        results.append(result)
+                        processed += 1
+                        if result.status in stats:
+                            stats[result.status] += 1
+                        else:
+                            stats['unknown'] += 1
+                        await update_progress(force=False)
+
+            await asyncio.gather(*(run_single(path, name) for path, name in files), return_exceptions=True)
+            await update_progress(force=True)
+
+            timestamp = datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S')
+            output_dir = os.path.join(temp_dir, 'results')
+            os.makedirs(output_dir, exist_ok=True)
+
+            txt_filename = f'frozen_times_{timestamp}.txt'
+            frozen_zip_name = f'frozen_accounts_{timestamp}.zip'
+            normal_zip_name = f'normal_accounts_{timestamp}.zip'
+            txt_path = os.path.join(output_dir, txt_filename)
+            frozen_zip_path = os.path.join(output_dir, frozen_zip_name)
+            normal_zip_path = os.path.join(output_dir, normal_zip_name)
+
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write("号码 | 冻结时间\n")
+                for item in results:
+                    f.write(f"{item.phone} | {item.display_time}\n")
+
+            frozen_items = [x for x in results if x.status in ('frozen', 'banned')]
+            normal_items = [x for x in results if x.status == 'normal']
+            self._pack_frozen_check_accounts(frozen_items, frozen_zip_path)
+            self._pack_frozen_check_accounts(normal_items, normal_zip_path)
+
+            elapsed = int(time.time() - start_time)
+            summary = f"""✅ 检测完成！
+
+📊 统计结果：
+• {t(user_id, 'frozen_check_result_total').format(count=total)}
+• {t(user_id, 'frozen_check_result_frozen').format(count=stats['frozen'])}
+• {t(user_id, 'frozen_check_result_normal').format(count=stats['normal'])}
+• {t(user_id, 'frozen_check_result_banned').format(count=stats['banned'])}
+• {t(user_id, 'frozen_check_result_error').format(count=stats['unknown'])}
+
+⏱️ 总用时：{elapsed // 60}分{elapsed % 60}秒
+
+📦 生成文件：
+"""
+            self.safe_edit_message_text(progress_msg, summary, parse_mode='HTML')
+
+            with open(txt_path, 'rb') as f:
+                context.bot.send_document(
+                    chat_id=user_id,
+                    document=f,
+                    filename=txt_filename,
+                    caption=t(user_id, 'frozen_check_report')
+                )
+
+            with open(frozen_zip_path, 'rb') as f:
+                context.bot.send_document(
+                    chat_id=user_id,
+                    document=f,
+                    filename=frozen_zip_name,
+                    caption=t(user_id, 'frozen_check_frozen_zip').format(count=len(frozen_items))
+                )
+
+            with open(normal_zip_path, 'rb') as f:
+                context.bot.send_document(
+                    chat_id=user_id,
+                    document=f,
+                    filename=normal_zip_name,
+                    caption=t(user_id, 'frozen_check_normal_zip').format(count=len(normal_items))
+                )
+
+        except Exception as e:
+            logger.error(f"Frozen check failed: {e}")
+            self.safe_edit_message_text(progress_msg, f"❌ {t(user_id, 'regtime_processing_failed')}\n\n{str(e)}", parse_mode='HTML')
+        finally:
+            self.cleanup_frozen_check_task(user_id)
+
+    async def check_account_frozen_status(self, file_path, file_type, account_name):
+        """检测单个账号冻结状态"""
+        client = None
+        session_base = None
+        temp_session_dir = None
+        generated_session_base = None
+        phone = extract_phone_from_path(file_path) if file_type == 'session' else extract_phone_from_tdata_path(file_path)
+        if not phone:
+            phone = os.path.splitext(account_name)[0]
+
+        try:
+            if file_type == 'tdata':
+                if not OPENTELE_AVAILABLE:
+                    return FrozenCheckResult(phone=phone, status='unknown', display_time='未知', file_path=file_path, file_name=account_name, file_type=file_type)
+
+                os.makedirs(config.SESSIONS_BAK_DIR, exist_ok=True)
+                generated_session_base = os.path.join(config.SESSIONS_BAK_DIR, f"frozen_{time.time_ns()}_{random.randint(1000, 9999)}")
+                tdesk = await asyncio.wait_for(asyncio.to_thread(TDesktop, file_path), timeout=FROZEN_CHECK_SINGLE_TIMEOUT)
+                if not tdesk.isLoaded():
+                    return FrozenCheckResult(phone=phone, status='unknown', display_time='未知', file_path=file_path, file_name=account_name, file_type=file_type)
+
+                temp_client = await asyncio.wait_for(
+                    tdesk.ToTelethon(session=generated_session_base, flag=UseCurrentSession, api=API.TelegramDesktop),
+                    timeout=FROZEN_CHECK_SINGLE_TIMEOUT
+                )
+                await temp_client.disconnect()
+                session_base = generated_session_base
+            else:
+                session_base, temp_session_dir = copy_session_to_temp(file_path)
+
+            proxy_dict = None
+            if self.proxy_manager.is_proxy_mode_active(self.db):
+                proxy_info = self.proxy_manager.get_next_proxy()
+                if proxy_info:
+                    proxy_dict = {
+                        'proxy_type': proxy_info['type'],
+                        'addr': proxy_info['host'],
+                        'port': proxy_info['port'],
+                        'username': proxy_info.get('username'),
+                        'password': proxy_info.get('password')
+                    }
+
+            random_device = self.device_loader.get_random_device_config() if self.device_loader else {}
+            client = TelegramClient(
+                session_base,
+                int(config.API_ID),
+                str(config.API_HASH),
+                proxy=proxy_dict,
+                timeout=config.CONNECTION_TIMEOUT,
+                device_model=random_device.get('device_model', 'Desktop'),
+                system_version=random_device.get('system_version', 'Windows 10'),
+                app_version=random_device.get('app_version', '3.2.8 x64'),
+                lang_code=random_device.get('lang_code', 'en'),
+                system_lang_code=random_device.get('system_lang_code', 'en-US')
+            )
+
+            await asyncio.wait_for(client.connect(), timeout=FROZEN_CHECK_SINGLE_TIMEOUT)
+            if not await client.is_user_authorized():
+                return FrozenCheckResult(phone=phone, status='unknown', display_time='未知', file_path=file_path, file_name=account_name, file_type=file_type)
+
+            me = await client.get_me()
+            if getattr(me, 'phone', None):
+                phone = f"+{me.phone}" if not str(me.phone).startswith('+') else str(me.phone)
+
+            status = 'normal'
+            display_time = '未冻结'
+
+            restriction_reason = None
+            restricted_until = None
+            try:
+                full_user = await client(GetFullUserRequest(me))
+                target_user = full_user.user if hasattr(full_user, 'user') else me
+                restriction_reason = getattr(target_user, 'restriction_reason', None)
+                restricted_until = getattr(target_user, 'restricted_until', None)
+            except Exception:
+                pass
+
+            if restriction_reason:
+                if not restricted_until and isinstance(restriction_reason, list):
+                    for reason in restriction_reason:
+                        until_value = getattr(reason, 'until_date', None) or getattr(reason, 'until', None)
+                        if until_value:
+                            restricted_until = until_value
+                            break
+
+                formatted_time = self._format_frozen_time_value(restricted_until)
+                if formatted_time:
+                    status = 'frozen'
+                    display_time = formatted_time
+                else:
+                    status = 'banned'
+                    display_time = '永久封禁'
+            else:
+                # 备用检测：SpamBot
+                try:
+                    await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=10)
+                    await asyncio.sleep(1)
+                    msgs = await asyncio.wait_for(client.get_messages('SpamBot', limit=5), timeout=10)
+                    spam_text = ''
+                    for msg in msgs:
+                        if getattr(msg, 'out', False):
+                            continue
+                        if getattr(msg, 'raw_text', None):
+                            spam_text = msg.raw_text.lower()
+                            break
+                    if 'frozen' in spam_text:
+                        status = 'banned'
+                        display_time = '永久封禁'
+                except Exception:
+                    pass
+
+            return FrozenCheckResult(
+                phone=phone,
+                status=status,
+                display_time=display_time,
+                file_path=file_path,
+                file_name=account_name,
+                file_type=file_type
+            )
+
+        except (UserDeactivatedBanError, UserDeactivatedError, PhoneNumberBannedError):
+            return FrozenCheckResult(phone=phone, status='banned', display_time='永久封禁', file_path=file_path, file_name=account_name, file_type=file_type)
+        except Exception:
+            return FrozenCheckResult(phone=phone, status='unknown', display_time='未知', file_path=file_path, file_name=account_name, file_type=file_type)
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+            if temp_session_dir:
+                cleanup_temp_session(temp_session_dir)
+
+            if generated_session_base:
+                for suffix in ['.session', '.session-journal', '.session-shm', '.session-wal']:
+                    try:
+                        p = f"{generated_session_base}{suffix}"
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+
     # ================================
     # 查询注册时间功能
     # ================================

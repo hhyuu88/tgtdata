@@ -41,6 +41,7 @@ TEXTS = {
     'btn_cleanup': '🧹 一键清理',
     'btn_reauthorize': '🔑 重新授权',
     'btn_check_registration': '🕰️ 查询注册时间',
+    'btn_frozen_check': '📅 检查冻结时间',
     'btn_profile_update': '📝 修改资料',
     'btn_check_contact_limit': '🔍 检查通讯录限制',
     'btn_vip_menu': '💳 开通/兑换会员',
@@ -1823,6 +1824,21 @@ TEXTS = {
     'regtime_found_accounts': '✅ 找到 {count} 个账号文件',
     'regtime_file_type_session': '文件类型：SESSION',
     'regtime_file_type_tdata': '文件类型：TDATA',
+
+    # ===== 检查冻结时间功能 =====
+    'frozen_check_title': '📅 检查冻结时间',
+    'frozen_check_desc': '检测账号被冻结的具体时间',
+    'frozen_check_upload': '请上传包含账号的 ZIP 文件',
+    'frozen_check_processing': '正在检测账号状态...',
+    'frozen_check_progress': '进度：{current}/{total} ({percent}%)',
+    'frozen_check_result_total': '总计：{count} 个账号',
+    'frozen_check_result_frozen': '冻结：{count} 个',
+    'frozen_check_result_normal': '未冻结：{count} 个',
+    'frozen_check_result_banned': '永久封禁：{count} 个',
+    'frozen_check_result_error': '检测失败：{count} 个',
+    'frozen_check_report': '📄 冻结时间报告',
+    'frozen_check_frozen_zip': '❄️ 冻结账号（{count}个）',
+    'frozen_check_normal_zip': '✅ 未冻结账号（{count}个）',
     
     # 4. 处理说明
     'regtime_process_title': '处理说明：',
