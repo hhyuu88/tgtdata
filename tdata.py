@@ -25240,34 +25240,62 @@ admin3</code>
             if getattr(me, 'phone', None):
                 phone = f"+{me.phone}" if not str(me.phone).startswith('+') else str(me.phone)
 
-            # 能连接成功，检查SpamBot判断是否受限
+            # 默认状态
             status = 'normal'
             display_time = '未冻结'
-            
+
+            # 1. 首先检查账号限制信息获取解冻时间
+            restriction_reason = None
+            restricted_until = None
             try:
-                await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=10)
-                await asyncio.sleep(2)
-                msgs = await asyncio.wait_for(client.get_messages('SpamBot', limit=5), timeout=10)
-                spam_text = ''
-                for msg in msgs:
-                    if getattr(msg, 'out', False):
-                        continue
-                    if getattr(msg, 'raw_text', None):
-                        spam_text = msg.raw_text.lower()
-                        break
-                
-                # 检查SpamBot响应内容
-                if 'unfortunately' in spam_text and 'frozen' in spam_text:
-                    # "Unfortunately, your account is frozen"
+                full_user = await client(GetFullUserRequest(me))
+                target_user = full_user.user if hasattr(full_user, 'user') else me
+                restriction_reason = getattr(target_user, 'restriction_reason', None)
+                restricted_until = getattr(target_user, 'restricted_until', None)
+            except Exception as e:
+                logger.debug(f"Failed to get restriction info for {phone}: {e}")
+
+            # 2. 如果有限制原因，解析解冻时间
+            if restriction_reason:
+                # 如果restriction_reason是列表，尝试从中提取until时间
+                if not restricted_until and isinstance(restriction_reason, list):
+                    for reason in restriction_reason:
+                        until_value = getattr(reason, 'until_date', None) or getattr(reason, 'until', None)
+                        if until_value:
+                            restricted_until = until_value
+                            break
+
+                # 格式化解冻时间
+                formatted_time = self._format_frozen_time_value(restricted_until)
+                if formatted_time:
+                    status = 'frozen'
+                    display_time = formatted_time  # 显示具体解冻时间
+                else:
                     status = 'banned'
                     display_time = '永久封禁'
-                elif 'limit' in spam_text or 'restrict' in spam_text:
-                    # 其他限制消息
-                    status = 'frozen'
-                    display_time = '受限'
-            except Exception as e:
-                # SpamBot检测失败不影响主判断
-                logger.debug(f"SpamBot check failed for {phone}: {e}")
+            else:
+                # 3. 没有restriction_reason，使用SpamBot作为备用检测
+                try:
+                    await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=10)
+                    await asyncio.sleep(2)
+                    msgs = await asyncio.wait_for(client.get_messages('SpamBot', limit=5), timeout=10)
+                    spam_text = ''
+                    for msg in msgs:
+                        if getattr(msg, 'out', False):
+                            continue
+                        if getattr(msg, 'raw_text', None):
+                            spam_text = msg.raw_text.lower()
+                            break
+                    
+                    # 检查SpamBot响应内容
+                    if 'unfortunately' in spam_text and 'frozen' in spam_text:
+                        status = 'banned'
+                        display_time = '永久封禁'
+                    elif 'limit' in spam_text or 'restrict' in spam_text:
+                        status = 'frozen'
+                        display_time = '受限'
+                except Exception as e:
+                    logger.debug(f"SpamBot check failed for {phone}: {e}")
 
             return FrozenCheckResult(
                 phone=phone,
