@@ -25170,7 +25170,14 @@ admin3</code>
             self.cleanup_frozen_check_task(user_id)
 
     async def check_account_frozen_status(self, file_path, file_type, account_name):
-        """检测单个账号冻结状态"""
+        """检测单个账号冻结状态
+        
+        检测逻辑：
+        1. 连接时抛出 UserDeactivatedError/UserDeactivatedBanError → 冻结/封禁
+        2. 连接时抛出 PhoneNumberBannedError → 永久封禁
+        3. 连接成功后检查 SpamBot 响应 → 判断是否受限
+        4. 都没问题 → 正常账号
+        """
         client = None
         session_base = None
         temp_session_dir = None
@@ -25233,52 +25240,34 @@ admin3</code>
             if getattr(me, 'phone', None):
                 phone = f"+{me.phone}" if not str(me.phone).startswith('+') else str(me.phone)
 
+            # 能连接成功，检查SpamBot判断是否受限
             status = 'normal'
             display_time = '未冻结'
-
-            restriction_reason = None
-            restricted_until = None
+            
             try:
-                full_user = await client(GetFullUserRequest(me))
-                target_user = full_user.user if hasattr(full_user, 'user') else me
-                restriction_reason = getattr(target_user, 'restriction_reason', None)
-                restricted_until = getattr(target_user, 'restricted_until', None)
-            except Exception:
-                pass
-
-            if restriction_reason:
-                if not restricted_until and isinstance(restriction_reason, list):
-                    for reason in restriction_reason:
-                        until_value = getattr(reason, 'until_date', None) or getattr(reason, 'until', None)
-                        if until_value:
-                            restricted_until = until_value
-                            break
-
-                formatted_time = self._format_frozen_time_value(restricted_until)
-                if formatted_time:
-                    status = 'frozen'
-                    display_time = formatted_time
-                else:
+                await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=10)
+                await asyncio.sleep(2)
+                msgs = await asyncio.wait_for(client.get_messages('SpamBot', limit=5), timeout=10)
+                spam_text = ''
+                for msg in msgs:
+                    if getattr(msg, 'out', False):
+                        continue
+                    if getattr(msg, 'raw_text', None):
+                        spam_text = msg.raw_text.lower()
+                        break
+                
+                # 检查SpamBot响应内容
+                if 'unfortunately' in spam_text and 'frozen' in spam_text:
+                    # "Unfortunately, your account is frozen"
                     status = 'banned'
                     display_time = '永久封禁'
-            else:
-                # 备用检测：SpamBot
-                try:
-                    await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=10)
-                    await asyncio.sleep(1)
-                    msgs = await asyncio.wait_for(client.get_messages('SpamBot', limit=5), timeout=10)
-                    spam_text = ''
-                    for msg in msgs:
-                        if getattr(msg, 'out', False):
-                            continue
-                        if getattr(msg, 'raw_text', None):
-                            spam_text = msg.raw_text.lower()
-                            break
-                    if 'frozen' in spam_text:
-                        status = 'banned'
-                        display_time = '永久封禁'
-                except Exception:
-                    pass
+                elif 'limit' in spam_text or 'restrict' in spam_text:
+                    # 其他限制消息
+                    status = 'frozen'
+                    display_time = '受限'
+            except Exception as e:
+                # SpamBot检测失败不影响主判断
+                logger.debug(f"SpamBot check failed for {phone}: {e}")
 
             return FrozenCheckResult(
                 phone=phone,
@@ -25289,7 +25278,11 @@ admin3</code>
                 file_type=file_type
             )
 
-        except (UserDeactivatedBanError, UserDeactivatedError, PhoneNumberBannedError):
+        except UserDeactivatedError:
+            # 账号被冻结 - 这是主要的冻结检测方式
+            return FrozenCheckResult(phone=phone, status='frozen', display_time='已冻结', file_path=file_path, file_name=account_name, file_type=file_type)
+        except (UserDeactivatedBanError, PhoneNumberBannedError):
+            # 账号被永久封禁
             return FrozenCheckResult(phone=phone, status='banned', display_time='永久封禁', file_path=file_path, file_name=account_name, file_type=file_type)
         except Exception:
             return FrozenCheckResult(phone=phone, status='unknown', display_time='未知', file_path=file_path, file_name=account_name, file_type=file_type)
